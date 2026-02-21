@@ -25,6 +25,11 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from src.config import get_settings
 from src.logging_config import setup_logging, get_logger, call_id_var, generate_trace_id
+from src.services.conversation_manager import (
+    ConversationManager,
+    ConversationState,
+    CallEndReason,
+)
 
 # Bootstrap logging before anything else
 setup_logging()
@@ -46,6 +51,12 @@ CURRENT TASK:
 - Ask about: new patient capacity, accepted insurance plans, scheduling process, required referral documents, wait times, and contact info
 - Be conversational — don't read questions like a survey
 
+CONVERSATION FLOW:
+- First, greet them and ask how they are
+- After they respond, ask if they have about 2 minutes for a quick directory verification
+- If they say yes, begin the verification questions one at a time
+- If they say no, ask when would be a better time and end politely
+
 IMPORTANT RULES:
 - If you reach voicemail, leave a brief message and end the call
 - If asked who you are, explain you're an automated system verifying directory info
@@ -59,11 +70,21 @@ IMPORTANT RULES:
 class VerificationAgent(Agent):
     """
     LiveKit Agent that conducts specialist verification calls.
+
+    Uses ConversationManager to drive a structured 7-question protocol.
+    LLM function tools let the model signal when questions are answered,
+    when clarification is needed, or when the call should end.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, conversation: ConversationManager) -> None:
         super().__init__(instructions=SYSTEM_INSTRUCTIONS)
+        self.conversation = conversation
         logger.info("VerificationAgent initialized")
+
+    async def update_instructions(self) -> None:
+        """Refresh agent instructions based on conversation progress."""
+        context = self.conversation.get_current_instructions()
+        await super().update_instructions(SYSTEM_INSTRUCTIONS + "\n\nCURRENT CONTEXT:\n" + context)
 
 
 # LiveKit Agent Server Setup
@@ -88,6 +109,20 @@ async def handle_session(session: AgentSession) -> None:
         room=session.room.name if session.room else "unknown",
     )
 
+    # Load specialist data from room metadata (set by call orchestrator)
+    specialist_data = {}
+    room_metadata = session.room.metadata if session.room else None
+    if room_metadata:
+        import json
+        try:
+            specialist_data = json.loads(room_metadata)
+        except json.JSONDecodeError:
+            logger.warning("invalid_room_metadata", metadata=room_metadata)
+
+    # Initialize conversation manager with specialist context
+    conversation = ConversationManager(specialist_data=specialist_data)
+    agent = VerificationAgent(conversation=conversation)
+
     try:
         # Configure the voice pipeline
         agent_session = AgentSession(
@@ -106,20 +141,22 @@ async def handle_session(session: AgentSession) -> None:
 
         # Start the agent in the room
         await agent_session.start(
-            agent=VerificationAgent(),
+            agent=agent,
             room=session.room,
             room_input_options=RoomInputOptions(
                 noise_cancellation=noise_cancellation.BVC(),
             ),
         )
 
-        # Generate the opening greeting
+        # Transition to greeting and generate the opening
+        greeting_instructions = conversation.get_current_instructions()
         await agent_session.generate_reply(
-            instructions="Greet the person who answered. Introduce yourself as the "
-            f"automated directory verification system calling on behalf of "
-            f"{settings.clinic_name}. Ask if this is a good time for a quick "
-            f"2-minute verification of their directory information."
+            instructions=greeting_instructions
         )
+
+        # Move to questions phase after greeting
+        conversation.advance_to_questions()
+        await agent.update_instructions()
 
         logger.info("agent_started_successfully", trace_id=trace_id)
 
