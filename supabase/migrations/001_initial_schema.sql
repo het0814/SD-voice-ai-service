@@ -132,15 +132,6 @@ create trigger update_calls_modtime
     before update on verification_calls
     for each row execute procedure update_updated_at_column();
 
--- RLS Policies (Enable RLS, but allow service role full access)
-alter table specialists enable row level security;
-alter table verification_calls enable row level security;
-alter table data_updates enable row level security;
-alter table audit_log enable row level security;
-
--- For this backend service, we primarily access via service role key which bypasses RLS.
--- But it's good practice to have a policy for potential dashboard users later.
-create policy "Enable read access for authenticated users" on specialists for select using (auth.role() = 'authenticated');
-create policy "Enable read access for authenticated users" on verification_calls for select using (auth.role() = 'authenticated');
-create policy "Enable read access for authenticated users" on data_updates for select using (auth.role() = 'authenticated');
-create policy "Enable read access for authenticated users" on audit_log for select using (auth.role() = 'authenticated');
+-- Note: RLS is not enabled on these tables.
+-- This system handles specialist directory data only (not patient data),
+-- and all access is via the Supabase service role key from our backend.
