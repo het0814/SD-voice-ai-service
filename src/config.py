@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # ── AI Model Keys ────────────────────────────────────────────
     deepgram_api_key: str = Field(default="", description="Deepgram API key for STT")
-    elevenlabs_api_key: str = Field(default="", description="ElevenLabs API key for TTS")
+    eleven_api_key: str = Field(default="", description="ElevenLabs API key for TTS")
     openai_api_key: str = Field(default="", description="OpenAI API key for LLM")
     anthropic_api_key: str = Field(default="", description="Anthropic API key (fallback LLM)")
 
