@@ -61,7 +61,18 @@ CONFIDENCE SCORING GUIDE:
 TRANSCRIPT:
 {transcript}
 
-Extract all fields as a JSON array. Only include fields that were actually discussed."""
+You MUST return your response ONLY as a JSON object containing a "fields" array, where each element matches this exact structure:
+{
+  "fields": [
+    {
+      "field_name": "accepting_new_patients",
+      "value": true,
+      "confidence": 0.95,
+      "source_segment": "Yes, we are taking new patients right now."
+    }
+  ]
+}
+Only include fields that were actually discussed and changed or confirmed."""
 
 
 async def extract_from_transcript(
@@ -163,20 +174,24 @@ async def _call_llm_for_extraction(transcript: str) -> list[ExtractedField]:
     parsed = json.loads(content)
 
     # The LLM should return a JSON object with a "fields" array
-    raw_fields = parsed.get("fields", parsed.get("extractions", []))
+    raw_fields = parsed.get("fields", parsed.get("extractions", parsed.get("directory_information", [])))
     if isinstance(parsed, list):
         raw_fields = parsed
 
     fields: list[ExtractedField] = []
     for item in raw_fields:
         try:
+            val = item.get("value")
+            if val is None:
+                val = item.get("extracted_value")
+
             fields.append(ExtractedField(
                 field_name=item.get("field_name", item.get("field", "")),
-                value=item.get("value"),
+                value=val,
                 confidence=float(item.get("confidence", item.get("confidence_score", 0.5))),
-                source_segment=item.get("source_segment", item.get("quote", None)),
+                source_segment=item.get("source_segment", item.get("exact_quote", item.get("quote", None))),
             ))
-        except (ValueError, KeyError) as e:
+        except Exception as e:
             logger.warning("skipping_malformed_field", item=item, error=str(e))
 
     return fields

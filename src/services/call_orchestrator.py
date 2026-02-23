@@ -171,8 +171,8 @@ class CallOrchestrator:
             await self._update_state(call_id, CallStatus.FAILED, failure_reason="No phone number")
             return False
 
-        # Room name = unique per call
-        room_name = f"verify-{call_id[:8]}"
+        # Room name = unique per call (full UUID)
+        room_name = f"verify-{call_id}"
 
         try:
             async with LiveKitAPI() as api:

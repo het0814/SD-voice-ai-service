@@ -14,6 +14,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv(".env.local")
@@ -109,15 +110,25 @@ async def handle_session(session: AgentSession) -> None:
         room=session.room.name if session.room else "unknown",
     )
 
-    # Load specialist data from room metadata (set by call orchestrator)
+    call_id = ""
+    if session.room and session.room.name.startswith("verify-"):
+        call_id = session.room.name.replace("verify-", "")
+
+    # Load specialist data
     specialist_data = {}
-    room_metadata = session.room.metadata if session.room else None
-    if room_metadata:
-        import json
+    if call_id:
+        from src.db import get_db
+        db = get_db()
         try:
-            specialist_data = json.loads(room_metadata)
-        except json.JSONDecodeError:
-            logger.warning("invalid_room_metadata", metadata=room_metadata)
+            call_res = db.client.table("verification_calls").select("specialist_id").eq("id", call_id).execute()
+            if call_res.data:
+                sp_id = call_res.data[0]["specialist_id"]
+                sp_data = await db.get_specialist(sp_id)
+                if sp_data:
+                    specialist_data = sp_data
+                    specialist_data["call_id"] = call_id
+        except Exception as e:
+            logger.error("failed_to_fetch_specialist", error=str(e))
 
     # Initialize conversation manager with specialist context
     conversation = ConversationManager(specialist_data=specialist_data)
@@ -148,6 +159,53 @@ async def handle_session(session: AgentSession) -> None:
             ),
         )
 
+        # Event: Agent finished speaking
+        @agent_session.on("agent_speech_committed")
+        def on_agent_speech_committed(msg: rtc.ChatMessage):
+            if msg.message:
+                conversation.add_transcript("agent", msg.message)
+
+        # Event: User finished speaking
+        @agent_session.on("user_speech_committed")
+        def on_user_speech_committed(msg: rtc.ChatMessage):
+            if msg.message:
+                conversation.add_transcript("user", msg.message)
+
+        # We save the transcript during the job shutdown phase to prevent task cancellation issues.
+        async def on_shutdown():
+            logger.info("agent_shutting_down", call_id=call_id)
+            if call_id:
+                # Build the final transcript directly from the LiveKit managed history
+                transcript_text = ""
+                if hasattr(agent_session, "history"):
+                    lines = []
+                    for msg in agent_session.history.messages():
+                        if msg.role in ("user", "assistant"):
+                            content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
+                            if content_str.strip():
+                                lines.append(f"{msg.role.upper()}: {content_str}")
+                    transcript_text = "\n".join(lines)
+                
+                if not transcript_text:
+                    transcript_text = conversation.get_full_transcript()
+                
+                # Fetch orchestrator and complete the call in DB/Redis
+                from src.services.call_orchestrator import CallOrchestrator
+                
+                logger.info("saving_transcript", length=len(transcript_text))
+                orch = CallOrchestrator()
+                await orch.initialize()
+                try:
+                    await orch.call_completed(call_id, transcript=transcript_text)
+                    logger.info("transcript_saved_successfully")
+                except Exception as e:
+                    logger.error("error_saving_transcript", error=str(e))
+                finally:
+                    await orch.close()
+
+        # Register the shutdown callback with the JobContext
+        session.add_shutdown_callback(on_shutdown)
+
         # Transition to greeting and generate the opening
         greeting_instructions = conversation.get_current_instructions()
         await agent_session.generate_reply(
@@ -163,7 +221,6 @@ async def handle_session(session: AgentSession) -> None:
     except Exception as e:
         logger.error("agent_session_error", trace_id=trace_id, error=str(e))
         raise
-
 
 # Entry Point
 if __name__ == "__main__":
